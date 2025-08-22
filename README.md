@@ -63,17 +63,17 @@ dotnet run --project Bossa.Test.HttpApi
 1. Update score:
 bash
 
-curl -X POST http://localhost:5000/customer/12345/score/100
+curl -X POST http://localhost:5001/customer/12345/score/100
 
 2. Query leaderboard:
 bash
 
-curl http://localhost:5000/leaderboard?start=1&end=5
+curl http://localhost:5001/leaderboard?start=1&end=5
 
 3. Query neighbors:
 bash
 
-curl http://localhost:5000/leaderboard/12345?high=2&low=2
+curl http://localhost:5001/leaderboard/12345?high=2&low=2
 
 ## Design Decisions
 
