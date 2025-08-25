@@ -1,69 +1,57 @@
-﻿
-
+﻿using Bossa.Test.HttpApi.Models;
 using Bossa.Test.HttpApi.Services;
 using Microsoft.AspNetCore.Mvc;
-using System.ComponentModel.DataAnnotations;
+
 namespace Bossa.Test.HttpApi.Controllers;
 [ApiController]
+[Route("leaderboard")]
 public class LeaderboardController : ControllerBase
 {
-    private readonly LeaderboardService _service;
+    private readonly IScoreboardService _scoreboardService;
 
-    public LeaderboardController(LeaderboardService service)
+    public LeaderboardController(IScoreboardService scoreboardService)
     {
-        _service = service;
+        _scoreboardService = scoreboardService;
     }
 
-    /// <summary>
-    /// Update Score ( POST /customer/{customerid}/score/{score})
-    /// </summary>
-    /// <param name="customerId">customerId</param>
-    /// <param name="score">score</param>
-    /// <returns></returns>
-    [HttpPost("/customer/{customerid}/score/{score}")]
-    [ProducesResponseType(StatusCodes.Status201Created)]
-    [ProducesResponseType(StatusCodes.Status400BadRequest)]
-    public async Task<IActionResult> UpdateScore(
-        [FromRoute] long customerId,
-        [FromRoute, Range(-1000, 1000)] decimal score)
+    [HttpGet]
+    public IActionResult GetByRank([FromQuery] int start, [FromQuery] int end)
     {
-        var newScore = await _service.UpdateScoreAsync(customerId, score);
-        if (newScore < 0) newScore = 0;
-        return Ok(new { customerId,newScore});
+        try
+        {
+            if (start < 1 || end < start)
+            {
+                return BadRequest("Invalid rank range");
+            }
+
+            var results = _scoreboardService.GetByRank(start, end);
+            return Ok(results);
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, $"Internal server error: {ex.Message}");
+        }
     }
 
-    /// <summary>
-    ///  Query the rankings（ GET /leaderboard?start={start}&end={end}）
-    /// </summary>
-    /// <param name="start">start</param>
-    /// <param name="end">end</param>
-    /// <returns></returns>
-    [HttpGet("/leaderboard")]
-    [ProducesResponseType(StatusCodes.Status200OK)]
-    public async Task<IActionResult> GetLeaderboard(
-        [FromQuery] int start = 1,
-        [FromQuery] int end = 10)
-    {
-        var result = await _service.GetByRankRangeAsync(start, end);
-        return Ok(result);
-    }
-
-    /// <summary>
-    ///  Check the rankings near customers（ GET /leaderboard/{customerid}?high={high}&low={low}）
-    /// </summary>
-    /// <param name="customerId">customerId</param>
-    /// <param name="high">high</param>
-    /// <param name="low">low</param>
-    /// <returns></returns>
-    [HttpGet("/leaderboard/{customerid}")]
-    [ProducesResponseType(StatusCodes.Status200OK)]
-    public async Task<IActionResult> GetNeighborRank(
-        [FromRoute] long customerId,
+    [HttpGet("{customerId}")]
+    public IActionResult GetCustomerNeighbors(
+        long customerId,
         [FromQuery] int high = 0,
         [FromQuery] int low = 0)
     {
-        var result = await _service.GetNeighborRangeAsync(customerId, high, low);
-        return Ok(result);
+        try
+        {
+            if (high < 0 || low < 0)
+            {
+                return BadRequest("High and low must be non-negative");
+            }
+
+            var results = _scoreboardService.GetCustomerNeighbors(customerId, high, low);
+            return Ok(results);
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, $"Internal server error: {ex.Message}");
+        }
     }
 }
- 
