@@ -8,13 +8,13 @@ export const options = {
       executor: 'constant-vus',
       exec: 'write',
       vus: 10,
-      duration: '10s',
+      duration: '60s',
     },
     reads: {
       executor: 'constant-vus',
       exec: 'read',
       vus: 50,
-      duration: '10s',
+      duration: '60s',
     }
   }
 };

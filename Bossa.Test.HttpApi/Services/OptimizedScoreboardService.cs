@@ -6,16 +6,15 @@ using System.Threading;
 
 namespace Bossa.Test.HttpApi.Services
 {
-    /// <summary>
-    /// Optimized skip list based scoreboard service with lock striping
-    /// </summary>
     public class OptimizedScoreboardService : IScoreboardService
     {
-        // Stores customer scores
         private readonly ConcurrentDictionary<long, decimal> _customerScores = new();
         private readonly SkipList _skipList = new();
 
-        // Lock striping for concurrent updates
+        // Global read-write lock for skip list structural changes
+        private readonly ReaderWriterLockSlim _globalLock = new(LockRecursionPolicy.SupportsRecursion);
+
+        // Lock striping for per-customer updates
         private const int LockCount = 4096;
         private readonly object[] _locks = new object[LockCount];
 
@@ -38,33 +37,50 @@ namespace Bossa.Test.HttpApi.Services
             {
                 if (!_customerScores.TryGetValue(customerId, out decimal currentScore))
                 {
-                    // New customer
                     decimal newScore = scoreChange;
-
-                    // Only add to leaderboard if score is positive
                     if (newScore > 0)
                     {
-                        _skipList.Insert(customerId, newScore);
-                        _customerScores[customerId] = newScore;
+                        _globalLock.EnterWriteLock();
+                        try
+                        {
+                            _skipList.Insert(customerId, newScore);
+                            _customerScores[customerId] = newScore;
+                        }
+                        finally
+                        {
+                            _globalLock.ExitWriteLock();
+                        }
                         return newScore;
                     }
-                    return scoreChange; // Negative score, no insertion
+                    return scoreChange;
                 }
 
-                // Existing customer
                 decimal newScoreAfterUpdate = currentScore + scoreChange;
-
-                // Remove if score becomes non-positive
                 if (newScoreAfterUpdate <= 0)
                 {
-                    _skipList.Remove(customerId);
-                    _customerScores.TryRemove(customerId, out _);
+                    _globalLock.EnterWriteLock();
+                    try
+                    {
+                        _skipList.Remove(customerId);
+                        _customerScores.TryRemove(customerId, out _);
+                    }
+                    finally
+                    {
+                        _globalLock.ExitWriteLock();
+                    }
                     return newScoreAfterUpdate;
                 }
 
-                // Update score in skip list
-                _skipList.Update(customerId, newScoreAfterUpdate);
-                _customerScores[customerId] = newScoreAfterUpdate;
+                _globalLock.EnterWriteLock();
+                try
+                {
+                    _skipList.Update(customerId, newScoreAfterUpdate);
+                    _customerScores[customerId] = newScoreAfterUpdate;
+                }
+                finally
+                {
+                    _globalLock.ExitWriteLock();
+                }
                 return newScoreAfterUpdate;
             }
         }
@@ -72,18 +88,32 @@ namespace Bossa.Test.HttpApi.Services
         public List<CustomerRecord> GetByRank(int start, int end)
         {
             if (start < 1 || end < start) return new List<CustomerRecord>();
-            return _skipList.GetRange(start, end);
+
+            _globalLock.EnterReadLock();
+            try
+            {
+                return _skipList.GetRange(start, end);
+            }
+            finally
+            {
+                _globalLock.ExitReadLock();
+            }
         }
 
         public List<CustomerRecord> GetCustomerNeighbors(long customerId, int high, int low)
         {
-            return _skipList.GetNeighbors(customerId, high, low);
+            _globalLock.EnterReadLock();
+            try
+            {
+                return _skipList.GetNeighbors(customerId, high, low);
+            }
+            finally
+            {
+                _globalLock.ExitReadLock();
+            }
         }
     }
 
-    /// <summary>
-    /// Optimized skip list implementation with ranking support
-    /// </summary>
     public class SkipList
     {
         private class Node
@@ -104,12 +134,10 @@ namespace Bossa.Test.HttpApi.Services
             }
         }
 
-        // Configuration
         private const int MaxLevel = 32;
         private const double Probability = 0.5;
         private static readonly ThreadLocal<Random> _random = new(() => new Random());
 
-        // Data structures
         private readonly Node _head = new(0, 0, MaxLevel);
         private int _currentLevel = 1;
         private int _count = 0;
@@ -136,9 +164,6 @@ namespace Bossa.Test.HttpApi.Services
             return a.CustomerId.CompareTo(b.CustomerId);  // Lower customer ID comes first
         }
 
-        /// <summary>
-        /// Insert a new customer into the skip list
-        /// </summary>
         public void Insert(long customerId, decimal score)
         {
             if (_nodeMap.ContainsKey(customerId))
@@ -148,13 +173,11 @@ namespace Bossa.Test.HttpApi.Services
             int[] rank = new int[MaxLevel];
             Node current = _head;
 
-            // Initialize rank tracking
             for (int i = 0; i < MaxLevel; i++)
             {
                 rank[i] = 0;
             }
 
-            // Traverse from top level down to find insertion points
             for (int i = _currentLevel - 1; i >= 0; i--)
             {
                 rank[i] = i == _currentLevel - 1 ? 0 : rank[i + 1];
@@ -168,11 +191,9 @@ namespace Bossa.Test.HttpApi.Services
                 update[i] = current;
             }
 
-            // Create new node with random level
             int newLevel = GetRandomLevel();
             Node newNode = new Node(customerId, score, newLevel);
 
-            // Expand levels if needed
             if (newLevel > _currentLevel)
             {
                 for (int i = _currentLevel; i < newLevel; i++)
@@ -184,24 +205,20 @@ namespace Bossa.Test.HttpApi.Services
                 _currentLevel = newLevel;
             }
 
-            // Insert node and update spans
             for (int i = 0; i < newLevel; i++)
             {
                 newNode.Next[i] = update[i].Next[i];
                 update[i].Next[i] = newNode;
 
-                // Calculate and update spans
                 newNode.Span[i] = update[i].Span[i] - (rank[0] - rank[i]);
                 update[i].Span[i] = rank[0] - rank[i] + 1;
             }
 
-            // Update spans for unaffected higher levels
             for (int i = newLevel; i < _currentLevel; i++)
             {
                 update[i].Span[i]++;
             }
 
-            // Update level 0 prev pointers (doubly-linked list)
             newNode.Prev = update[0] == _head ? null : update[0];
             if (newNode.Next[0] != null)
             {
@@ -212,34 +229,41 @@ namespace Bossa.Test.HttpApi.Services
             _nodeMap[customerId] = newNode;
         }
 
-        /// <summary>
-        /// Update existing customer score
-        /// </summary>
         public void Update(long customerId, decimal newScore)
         {
             if (!_nodeMap.TryGetValue(customerId, out Node node))
                 throw new KeyNotFoundException("Customer not found");
 
-            // Check if position doesn't change
-            if (node.Prev != null && Compare(node.Prev, node) < 0 &&
-                node.Next[0] != null && Compare(node, node.Next[0]) < 0)
+            bool positionChanged = true;
+
+            // Check if position remains the same
+            if (node.Prev != null)
+            {
+                int prevCompare = Compare(node.Prev, node);
+                if (prevCompare > 0) positionChanged = false;
+            }
+
+            if (positionChanged && node.Next[0] != null)
+            {
+                int nextCompare = Compare(node, node.Next[0]);
+                if (nextCompare > 0) positionChanged = false;
+            }
+
+            if (!positionChanged)
             {
                 node.Score = newScore;
                 return;
             }
 
-            // Full remove and reinsert if position changes
             Remove(node);
             Insert(customerId, newScore);
         }
 
-        // Internal remove without dictionary cleanup
         private void Remove(Node node)
         {
             Node[] update = new Node[MaxLevel];
             Node current = _head;
 
-            // Find update points
             for (int i = _currentLevel - 1; i >= 0; i--)
             {
                 while (current.Next[i] != null && Compare(current.Next[i], node) < 0)
@@ -249,10 +273,8 @@ namespace Bossa.Test.HttpApi.Services
                 update[i] = current;
             }
 
-            // Verify we found the node
             if (current.Next[0] != node) return;
 
-            // Remove node and update spans
             for (int i = 0; i < _currentLevel; i++)
             {
                 if (update[i].Next[i] == node)
@@ -266,7 +288,6 @@ namespace Bossa.Test.HttpApi.Services
                 }
             }
 
-            // Update prev pointers
             if (node.Next[0] != null)
             {
                 node.Next[0].Prev = node.Prev;
@@ -276,7 +297,6 @@ namespace Bossa.Test.HttpApi.Services
                 node.Prev.Next[0] = node.Next[0];
             }
 
-            // Clean up top levels
             while (_currentLevel > 1 && _head.Next[_currentLevel - 1] == null)
             {
                 _currentLevel--;
@@ -306,7 +326,6 @@ namespace Bossa.Test.HttpApi.Services
             int currentRank = 0;
             Node current = _head;
 
-            // Fast forward to start position using skip list
             for (int i = _currentLevel - 1; i >= 0; i--)
             {
                 while (current.Next[i] != null && currentRank + current.Span[i] <= start)
@@ -316,14 +335,12 @@ namespace Bossa.Test.HttpApi.Services
                 }
             }
 
-            // Linear traversal for the remaining nodes
             while (currentRank < start)
             {
                 current = current.Next[0];
                 currentRank++;
             }
 
-            // Collect results in descending score order
             for (int rank = start; rank <= end; rank++)
             {
                 results.Add(new CustomerRecord
@@ -333,8 +350,8 @@ namespace Bossa.Test.HttpApi.Services
                     Rank = rank
                 });
 
+                if (current.Next[0] == null) break;
                 current = current.Next[0];
-                if (current == null) break;
             }
 
             return results;
@@ -345,28 +362,21 @@ namespace Bossa.Test.HttpApi.Services
             if (!_nodeMap.TryGetValue(customerId, out Node node))
                 return new List<CustomerRecord>();
 
-            // Calculate rank of target node
+            // Calculate rank using span information
             int rank = 1;
             Node current = _head;
             for (int i = _currentLevel - 1; i >= 0; i--)
             {
-                while (current.Next[i] != null)
+                while (current.Next[i] != null && Compare(current.Next[i], node) <= 0)
                 {
-                    if (Compare(current.Next[i], node) <= 0)
-                    {
-                        rank += current.Span[i];
-                        current = current.Next[i];
-                    }
-                    else
-                    {
-                        break;
-                    }
+                    rank += current.Span[i];
+                    current = current.Next[i];
                 }
             }
 
             var neighbors = new List<CustomerRecord>();
 
-            // Collect higher neighbors (before target)
+            // Collect higher neighbors
             Node prev = node.Prev;
             for (int i = 0; i < high && prev != null; i++)
             {
@@ -374,7 +384,7 @@ namespace Bossa.Test.HttpApi.Services
                 {
                     CustomerId = prev.CustomerId,
                     Score = prev.Score,
-                    Rank = rank - (high - i)
+                    Rank = rank - i - 1
                 });
                 prev = prev.Prev;
             }
@@ -387,7 +397,7 @@ namespace Bossa.Test.HttpApi.Services
                 Rank = rank
             });
 
-            // Collect lower neighbors (after target)
+            // Collect lower neighbors
             Node next = node.Next[0];
             for (int i = 1; i <= low && next != null; i++)
             {
